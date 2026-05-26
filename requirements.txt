@@ -1,0 +1,4 @@
+matplotlib
+openpyxl
+numpy
+Pillow
