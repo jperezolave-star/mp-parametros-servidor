@@ -1,0 +1,149 @@
+import os, json, tempfile, subprocess, shutil
+from flask import Flask, request, jsonify, make_response
+
+app = Flask(__name__)
+PORT = int(os.environ.get("PORT", 8080))
+
+@app.after_request
+def add_cors(response):
+    response.headers["Access-Control-Allow-Origin"]  = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Accept"
+    return response
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    import traceback
+    print("ERROR:", traceback.format_exc())
+    resp = jsonify({"ok": False, "error": str(e)})
+    resp.status_code = 500
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    return resp
+
+def encontrar_node():
+    # Solo buscar en rutas reales de Node.js
+    rutas = [
+        "/usr/bin/node",
+        "/usr/local/bin/node",
+        "/root/.nvm/versions/node/v20/bin/node",
+        "/root/.nvm/versions/node/v18/bin/node",
+        "/mise/installs/node/20/bin/node",
+        "/mise/installs/node/18/bin/node",
+        "/app/.nvm/versions/node/v20/bin/node",
+    ]
+    # Primero probar 'node' en PATH
+    try:
+        r = subprocess.run(["which", "node"], capture_output=True, timeout=5)
+        if r.returncode == 0:
+            path = r.stdout.decode().strip()
+            # Verificar que no sea /proc
+            if "/proc" not in path:
+                r2 = subprocess.run([path, "--version"], capture_output=True, timeout=5)
+                if r2.returncode == 0:
+                    print(f"✓ Node en PATH: {path} ({r2.stdout.decode().strip()})")
+                    return path
+    except: pass
+
+    for path in rutas:
+        if not os.path.isfile(path): continue
+        try:
+            r = subprocess.run([path, "--version"], capture_output=True, timeout=5)
+            if r.returncode == 0:
+                print(f"✓ Node encontrado: {path} ({r.stdout.decode().strip()})")
+                return path
+        except: continue
+    print("✗ Node.js no encontrado")
+    return None
+
+NODE_PATH = encontrar_node()
+print(f"Node: {NODE_PATH}")
+
+def get_drive_service():
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+    creds_json = json.loads(os.environ["GOOGLE_CREDENTIALS"])
+    creds = service_account.Credentials.from_service_account_info(
+        creds_json, scopes=["https://www.googleapis.com/auth/drive.file"])
+    return build("drive", "v3", credentials=creds)
+
+def subir_drive(service, file_path, file_name, folder_id, mime_type):
+    from googleapiclient.http import MediaFileUpload
+    meta  = {"name": file_name, "parents": [folder_id]}
+    media = MediaFileUpload(file_path, mimetype=mime_type)
+    f = service.files().create(body=meta, media_body=media, fields="id,webViewLink").execute()
+    return f
+
+@app.route("/", methods=["GET"])
+def health():
+    return jsonify({"status":"ok","app":"MP Ingeniería — Servidor de parámetros","version":"1.1.0","node":NODE_PATH or "no encontrado"})
+
+@app.route("/generar", methods=["OPTIONS"])
+def generar_options():
+    return make_response("", 200)
+
+@app.route("/generar", methods=["POST"])
+def generar():
+    datos = request.get_json()
+    tmp   = tempfile.mkdtemp()
+    try:
+        json_path = os.path.join(tmp, "datos.json")
+        with open(json_path, "w") as f:
+            json.dump(datos, f, ensure_ascii=False)
+
+        mes  = (datos.get("mes") or "MES").upper().replace(" ", "_")
+        anio = datos.get("anio") or "2026"
+        slug = "".join(c if c.isalnum() or c=="_" else "_"
+                       for c in (datos.get("edificio") or "EDIFICIO").replace(" ","_"))[:20]
+
+        # Excel
+        excel_out = os.path.join(tmp, f"PARAMETROS_{slug}_{mes}_{anio}.xlsx")
+        subprocess.run(["python3", "/app/generar_excel.py", json_path, excel_out], check=True, timeout=60)
+        print(f"✓ Excel: {excel_out}")
+
+        # Gráficos
+        graf_dir = os.path.join(tmp, "graficos")
+        os.makedirs(graf_dir, exist_ok=True)
+        gr = subprocess.run(["python3", "/app/generar_graficos.py", graf_dir],
+            input=open(json_path,"rb").read(), capture_output=True, timeout=60)
+        try: graf_paths = json.loads(gr.stdout.decode().strip())
+        except: graf_paths = {}
+        datos["_graf_paths"] = graf_paths
+        with open(json_path, "w") as f:
+            json.dump(datos, f, ensure_ascii=False)
+
+        # Word
+        word_out = os.path.join(tmp, f"INFORME_{slug}_{mes}_{anio}.docx")
+        word_url = None
+        if NODE_PATH:
+            subprocess.run([NODE_PATH, "/app/generar_informe.js", json_path, word_out], check=True, timeout=120)
+            print(f"✓ Word: {word_out}")
+        else:
+            print("⚠ Node no disponible — solo Excel")
+
+        # Drive
+        service      = get_drive_service()
+        folder_excel = os.environ["DRIVE_FOLDER_EXCEL"]
+        folder_word  = os.environ["DRIVE_FOLDER_WORD"]
+
+        excel_file = subir_drive(service, excel_out, os.path.basename(excel_out), folder_excel,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        print(f"✓ Excel subido")
+
+        if NODE_PATH and os.path.exists(word_out):
+            word_file = subir_drive(service, word_out, os.path.basename(word_out), folder_word,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+            word_url = word_file.get("webViewLink")
+            print(f"✓ Word subido")
+
+        return jsonify({"ok":True,"excel_url":excel_file.get("webViewLink"),"word_url":word_url or "Solo Excel disponible"})
+
+    except Exception as e:
+        import traceback
+        print("ERROR:", traceback.format_exc())
+        return jsonify({"ok":False,"error":str(e)}), 500
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+if __name__ == "__main__":
+    print(f"✓ Servidor corriendo en puerto {PORT}")
+    app.run(host="0.0.0.0", port=PORT)
