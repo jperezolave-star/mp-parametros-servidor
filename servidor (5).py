@@ -80,7 +80,7 @@ def health():
     return jsonify({
         "status": "ok",
         "app": "MP Ingeniería — Servidor de parámetros",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "node": NODE_PATH or "no encontrado"
     })
 
