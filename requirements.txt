@@ -1,4 +1,0 @@
-matplotlib
-openpyxl
-numpy
-Pillow
