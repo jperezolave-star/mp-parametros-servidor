@@ -21,11 +21,15 @@ def handle_exception(e):
     return resp
 
 def get_drive_service():
-    from google.oauth2 import service_account
+    from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
-    creds_json = json.loads(os.environ["GOOGLE_CREDENTIALS"])
-    creds = service_account.Credentials.from_service_account_info(
-        creds_json, scopes=["https://www.googleapis.com/auth/drive.file"])
+    creds = Credentials(
+        token=None,
+        refresh_token=os.environ["GOOGLE_REFRESH_TOKEN"],
+        client_id=os.environ["GOOGLE_CLIENT_ID"],
+        client_secret=os.environ["GOOGLE_CLIENT_SECRET"],
+        token_uri="https://oauth2.googleapis.com/token"
+    )
     return build("drive", "v3", credentials=creds)
 
 def subir_drive(service, file_path, file_name, folder_id, mime_type):
