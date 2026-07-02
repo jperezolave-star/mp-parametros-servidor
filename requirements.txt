@@ -1,5 +1,5 @@
 flask
-google-auth
+google-auth==2.15.0
 google-api-python-client
 google-auth-httplib2
 openpyxl
